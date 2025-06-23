@@ -1,0 +1,7 @@
+{
+  "token": "0x123...",
+  "credentials": "0x456...",
+  "deploymentWallet": "0x789...",
+  "signers": ["0x...", "0x...", "0x..."],
+  "tokenTransferTx": "0xTXHASH..."
+}
