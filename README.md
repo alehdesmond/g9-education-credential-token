@@ -19,3 +19,5 @@ This project contains two smart contracts:
 npm install
 npx hardhat compile
 
+
+# g9-education-credential-token
