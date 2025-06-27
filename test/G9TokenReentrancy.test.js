@@ -1,45 +1,36 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
-describe("G9Token - Reentrancy Test", function () {
-  let G9Token, token, attackContract, owner, signer2, signer3;
+describe("G9Token - Reentrancy Security Test", function () {
+    let g9Token, attackerContract;
+    let owner, signer1, signer2;
 
-  beforeEach(async () => {
-    [owner, signer2, signer3] = await ethers.getSigners();
+    beforeEach(async function () {
+        [owner, signer1, signer2] = await ethers.getSigners();
 
-    const G9TokenFactory = await ethers.getContractFactory("G9Token");
-    token = await G9TokenFactory.deploy([
-      owner.address,
-      signer2.address,
-      signer3.address
-    ]);
-    await token.waitForDeployment();
+        const G9Token = await ethers.getContractFactory("G9Token");
+        g9Token = await G9Token.deploy(signer1.address, signer2.address, owner.address);
 
-    // Send ETH to token contract to allow withdrawal
-    await owner.sendTransaction({
-      to: await token.getAddress(),
-      value: ethers.parseEther("5")
+        const Attacker = await ethers.getContractFactory("Attacker");
+        attackerContract = await Attacker.deploy(await g9Token.getAddress());
+
+        await owner.sendTransaction({
+            to: await g9Token.getAddress(),
+            value: ethers.parseEther("10")
+        });
     });
 
-    // Deploy attack contract
-    const Attack = await ethers.getContractFactory("ReentrancyAttack");
-    attackContract = await Attack.deploy(await token.getAddress());
-    await attackContract.waitForDeployment();
-  });
+    it("Should block reentrancy during executeWithdrawal and revert", async function () {
+        const withdrawAmount = ethers.parseEther("1");
 
-  it("Should block reentrancy during executeWithdrawal", async () => {
-    const attackAddress = await attackContract.getAddress();
+        await g9Token.connect(signer1).proposeWithdraw(withdrawAmount, await attackerContract.getAddress());
+        await g9Token.connect(signer1).approveWithdraw(0);
+        await g9Token.connect(signer2).approveWithdraw(0);
 
-    // Admin proposes withdrawal to the attack contract
-    await token.proposeWithdrawal(ethers.parseEther("1"), attackAddress);
-
-    // Approvals (from different signers)
-    await token.connect(signer2).approveWithdrawal();
-    await token.connect(signer3).approveWithdrawal();
-
-    // Expect reentrancy to fail
-    await expect(
-      attackContract.connect(owner).attack()
-    ).to.be.revertedWith("Not authorized signer"); // or fallback logic
-  });
+        // FIX: The test should expect the 'ETH transfer failed' message, which is the
+        // final result of the ReentrancyGuard successfully stopping the attack.
+        await expect(
+            attackerContract.beginAttack()
+        ).to.be.revertedWith("ETH transfer failed");
+    });
 });

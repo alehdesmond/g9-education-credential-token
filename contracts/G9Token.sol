@@ -1,98 +1,209 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract G9Token is ERC20 {
-    address[3] public signers;
+/**
+ * @title G9Token
+ * @dev An ERC20 token with custom features:
+ * - Users can buy tokens by sending ETH directly to the contract.
+ * - Minting new tokens requires a 3-of-3 multi-signature approval.
+ * - Withdrawing contract funds requires a 2-of-3 multi-signature approval.
+ */
+contract G9Token is ERC20, ReentrancyGuard {
+    // --- State Variables ---
 
-    uint256 public constant TOKEN_PRICE = 1000;
+    address public immutable signer1;
+    address public immutable signer2;
+    address public immutable signer3;
 
-    mapping(address => bool) public withdrawalApprovals;
-    uint256 public approvalCount;
-    uint256 public withdrawalAmount;
-    address public withdrawalRecipient;
+    // The rate of tokens per 1 ETH (10^18 wei)
+    uint256 public constant rate = 1000;
 
-    event TokensPurchased(address indexed buyer, uint256 ethAmount, uint256 tokenAmount);
-    event TokensMinted(address indexed minter, address indexed recipient, uint256 amount);
-    event WithdrawalProposed(address indexed proposer, uint256 amount, address recipient);
-    event WithdrawalApproved(address indexed approver);
-    event WithdrawalExecuted(uint256 amount, address recipient);
+    // --- Data Structures for Multi-Signature Proposals ---
 
-    constructor(address[3] memory _signers) ERC20("Group9 Token", "G9TK") {
-        signers = _signers;
-        _mint(msg.sender, 10000 * 10 ** decimals());
+    // Proposal structure for minting new tokens
+    struct MintProposal {
+        address to;
+        uint256 amount;
+        mapping(address => bool) approvals;
+        uint256 approvalCount;
+        bool executed;
     }
 
+    // Proposal structure for withdrawing ETH from the contract
+    struct WithdrawProposal {
+        uint256 amount;
+        address payable to;
+        mapping(address => bool) approvals;
+        uint256 approvalCount;
+        bool executed;
+    }
+
+    uint256 public mintProposalCount;
+    mapping(uint256 => MintProposal) public mintProposals;
+
+    uint256 public withdrawProposalCount;
+    mapping(uint256 => WithdrawProposal) public withdrawProposals;
+
+    // --- Events ---
+
+    event MintProposalCreated(uint256 proposalId, address proposer, address to, uint256 amount);
+    event ProposalApproved(uint256 proposalId, address approver);
+    event MintExecuted(uint256 proposalId, address executor);
+
+    event WithdrawProposalCreated(uint256 proposalId, address proposer, address to, uint256 amount);
+    event WithdrawExecuted(uint256 proposalId, address executor);
+
+    // --- Constructor ---
+
+    constructor(address _signer1, address _signer2, address _signer3) ERC20("Group9Token", "G9TK") {
+        require(_signer1 != address(0) && _signer2 != address(0) && _signer3 != address(0), "Signers cannot be zero address");
+        require(_signer1 != _signer2 && _signer1 != _signer3 && _signer2 != _signer3, "Signers must be unique");
+        
+        signer1 = _signer1;
+        signer2 = _signer2;
+        signer3 = _signer3;
+    }
+
+    // --- Public Functions for Token Purchase ---
+
+    /**
+     * @dev Allows users to buy tokens by sending ETH directly to the contract.
+     */
     receive() external payable {
-        uint256 tokens = msg.value * TOKEN_PRICE;
-        _mint(msg.sender, tokens);
-        emit TokensPurchased(msg.sender, msg.value, tokens);
+        buyTokens();
     }
 
-    function buyTokens() external payable {
-        uint256 tokens = msg.value * TOKEN_PRICE;
-        _mint(msg.sender, tokens);
-        emit TokensPurchased(msg.sender, msg.value, tokens);
+    /**
+     * @dev A function to buy tokens, calculates amount based on msg.value and rate.
+     */
+    function buyTokens() public payable {
+        require(msg.value > 0, "Must send ETH to buy tokens");
+        uint256 tokensToMint = msg.value * rate;
+        _mint(msg.sender, tokensToMint);
     }
 
-    function mint(address to, uint256 amount) external onlySigner {
-        _mint(to, amount);
-        emit TokensMinted(msg.sender, to, amount);
-    }
-
-    function proposeWithdrawal(uint256 amount, address recipient) external onlySigner {
-        require(address(this).balance >= amount, "Insufficient contract balance");
-        withdrawalAmount = amount;
-        withdrawalRecipient = recipient;
-
-        for (uint i = 0; i < 3; i++) {
-            withdrawalApprovals[signers[i]] = false;
-        }
-        approvalCount = 0;
-
-        emit WithdrawalProposed(msg.sender, amount, recipient);
-    }
-
-    function approveWithdrawal() external onlySigner {
-        require(withdrawalRecipient != address(0), "No withdrawal proposed");
-        require(!withdrawalApprovals[msg.sender], "Already approved");
-
-        withdrawalApprovals[msg.sender] = true;
-        approvalCount++;
-        emit WithdrawalApproved(msg.sender);
-    }
-
-    function executeWithdrawal() external onlySigner {
-        require(approvalCount >= 2, "Need at least 2 approvals");
-        require(withdrawalRecipient != address(0), "No withdrawal proposed");
-
-        uint256 amount = withdrawalAmount;
-        address recipient = withdrawalRecipient;
-
-        withdrawalAmount = 0;
-        withdrawalRecipient = address(0);
-        approvalCount = 0;
-
-        payable(recipient).transfer(amount);
-        emit WithdrawalExecuted(amount, recipient);
-    }
-
-    function isSigner(address addr) public view returns (bool) {
-        for (uint i = 0; i < 3; i++) {
-            if (signers[i] == addr) {
-                return true;
-            }
-        }
-        return false;
-    }
+    // --- Multi-Signature Minting (3-of-3) ---
 
     modifier onlySigner() {
-        require(isSigner(msg.sender), "Not authorized signer");
+        require(msg.sender == signer1 || msg.sender == signer2 || msg.sender == signer3, "Not a signer");
         _;
     }
 
-    function decimals() public view virtual override returns (uint8) {
-        return 18;
+    /**
+     * @notice Step 1: A signer creates a proposal to mint tokens.
+     * @param to The address to receive the minted tokens.
+     * @param amount The amount of tokens to mint.
+     */
+    function proposeMint(address to, uint256 amount) public onlySigner {
+        require(to != address(0), "Cannot mint to zero address");
+        require(amount > 0, "Amount must be greater than zero");
+
+        uint256 proposalId = mintProposalCount;
+        mintProposals[proposalId].to = to;
+        mintProposals[proposalId].amount = amount;
+        
+        mintProposalCount++;
+        emit MintProposalCreated(proposalId, msg.sender, to, amount);
+    }
+
+    /**
+     * @notice Step 2: Other signers approve the mint proposal.
+     * @param proposalId The ID of the proposal to approve.
+     */
+    function approveMint(uint256 proposalId) public onlySigner {
+        require(proposalId < mintProposalCount, "Proposal does not exist");
+        
+        MintProposal storage proposal = mintProposals[proposalId];
+        require(!proposal.executed, "Proposal already executed");
+        require(!proposal.approvals[msg.sender], "Already approved");
+
+        proposal.approvals[msg.sender] = true;
+        proposal.approvalCount++;
+        emit ProposalApproved(proposalId, msg.sender);
+    }
+
+    /**
+     * @notice Step 3: Anyone can execute the proposal once it has 3 approvals.
+     * @param proposalId The ID of the proposal to execute.
+     */
+    function executeMint(uint256 proposalId) public {
+        require(proposalId < mintProposalCount, "Proposal does not exist");
+        
+        MintProposal storage proposal = mintProposals[proposalId];
+        require(!proposal.executed, "Proposal already executed");
+        require(proposal.approvalCount >= 3, "Not enough approvals");
+
+        proposal.executed = true;
+        _mint(proposal.to, proposal.amount);
+        emit MintExecuted(proposalId, msg.sender);
+    }
+
+    // --- Multi-Signature Withdrawal (2-of-3) ---
+
+    /**
+     * @notice Step 1: A signer creates a proposal to withdraw ETH.
+     * @param amount The amount of ETH to withdraw.
+     * @param to The address to send the ETH to.
+     */
+    function proposeWithdraw(uint256 amount, address payable to) public onlySigner {
+        require(amount <= address(this).balance, "Insufficient contract balance");
+        require(to != address(0), "Cannot withdraw to zero address");
+
+        uint256 proposalId = withdrawProposalCount;
+        withdrawProposals[proposalId].amount = amount;
+        withdrawProposals[proposalId].to = to;
+
+        withdrawProposalCount++;
+        emit WithdrawProposalCreated(proposalId, msg.sender, to, amount);
+    }
+
+    /**
+     * @notice Step 2: Other signers approve the withdrawal proposal.
+     * @param proposalId The ID of the proposal to approve.
+     */
+    function approveWithdraw(uint256 proposalId) public onlySigner {
+        require(proposalId < withdrawProposalCount, "Proposal does not exist");
+
+        WithdrawProposal storage proposal = withdrawProposals[proposalId];
+        require(!proposal.executed, "Proposal already executed");
+        require(!proposal.approvals[msg.sender], "Already approved");
+
+        proposal.approvals[msg.sender] = true;
+        proposal.approvalCount++;
+        emit ProposalApproved(proposalId, msg.sender);
+    }
+
+    /**
+     * @notice Step 3: Anyone can execute the proposal once it has 2 approvals.
+     * @param proposalId The ID of the proposal to execute.
+     */
+    function executeWithdraw(uint256 proposalId) public nonReentrant {
+        require(proposalId < withdrawProposalCount, "Proposal does not exist");
+
+        WithdrawProposal storage proposal = withdrawProposals[proposalId];
+        require(!proposal.executed, "Proposal already executed");
+        require(proposal.approvalCount >= 2, "Not enough approvals");
+
+        proposal.executed = true;
+        (bool success, ) = proposal.to.call{value: proposal.amount}("");
+        require(success, "ETH transfer failed");
+        emit WithdrawExecuted(proposalId, msg.sender);
+    }
+
+    /**
+     * @dev Returns the number of approvals for a given mint proposal.
+     */
+    function getMintApprovalCount(uint256 proposalId) public view returns (uint256) {
+        return mintProposals[proposalId].approvalCount;
+    }
+
+    /**
+     * @dev Returns the number of approvals for a given withdrawal proposal.
+     */
+    function getWithdrawApprovalCount(uint256 proposalId) public view returns (uint256) {
+        return withdrawProposals[proposalId].approvalCount;
     }
 }

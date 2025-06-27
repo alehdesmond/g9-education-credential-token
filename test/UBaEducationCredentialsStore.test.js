@@ -1,74 +1,54 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
-describe("UBaEducationCredentialsStore", function () {
-  let G9Token, token, Credentials, credentials;
-  let admin, student, signer2, signer3;
+describe("UBaEducationCredentialsStore Contract Tests", function () {
+    let g9Token;
+    let ubaStore;
+    let owner, userAccount;
 
-  beforeEach(async () => {
-    [admin, student, signer2, signer3] = await ethers.getSigners();
+    beforeEach(async function () {
+        [owner, userAccount] = await ethers.getSigners();
 
-    // Deploy G9Token
-    G9Token = await ethers.getContractFactory("G9Token");
-    token = await G9Token.deploy([admin.address, signer2.address, signer3.address]);
-    await token.waitForDeployment();
+        const G9Token = await ethers.getContractFactory("G9Token");
+        g9Token = await G9Token.deploy(owner.address, userAccount.address, "0xdD2FD4581271e230360230F9337D5c0430Bf44C0");
 
-    // Transfer tokens to student
-    await token.transfer(student.address, ethers.parseUnits("10", 18));
+        const UBaStore = await ethers.getContractFactory("UBaEducationCredentialsStore");
+        ubaStore = await UBaStore.deploy(await g9Token.getAddress());
+        
+        await owner.sendTransaction({ to: await g9Token.getAddress(), value: ethers.parseEther("1") });
+        const userInitialTokens = await g9Token.balanceOf(owner.address);
+        await g9Token.transfer(userAccount.address, userInitialTokens);
+    });
 
-    // Deploy credentials store
-    Credentials = await ethers.getContractFactory("UBaEducationCredentialsStore");
-    credentials = await Credentials.deploy(await token.getAddress());
-    await credentials.waitForDeployment();
-  });
+    describe("Credential Storage", function () {
+        const documentHash = ethers.keccak256(ethers.toUtf8Bytes("test_hash"));
 
-  it("should deploy with correct admin", async function () {
-    expect(await credentials.admin()).to.equal(admin.address);
-  });
+        it("Should allow a user to store a credential hash after approving tokens", async function () {
+            const fee = await ubaStore.fee();
+            const initialUserBalance = await g9Token.balanceOf(userAccount.address);
+            
+            await g9Token.connect(userAccount).approve(await ubaStore.getAddress(), fee);
+            
+            await expect(ubaStore.connect(userAccount).addCredential(documentHash))
+                .to.emit(ubaStore, "CredentialStored")
+                .withArgs(userAccount.address, documentHash);
 
-  it("should allow admin to add a hashed credential", async function () {
-    const docHash = ethers.keccak256(
-      ethers.toUtf8Bytes("John Doe|CS|BSc|2023")
-    );
+            const finalUserBalance = await g9Token.balanceOf(userAccount.address);
+            expect(finalUserBalance).to.equal(initialUserBalance - fee);
+            expect(await g9Token.balanceOf(await ubaStore.getAddress())).to.equal(fee);
+        });
+    });
 
-    await credentials.addCredential(student.address, docHash);
+    describe("Admin Functions", function () {
+        it("Should allow the owner to withdraw collected tokens", async function () {
+            const fee = await ubaStore.fee();
+            await g9Token.connect(userAccount).approve(await ubaStore.getAddress(), fee);
+            await ubaStore.connect(userAccount).addCredential("0x" + "a".repeat(64));
+            
+            const contractBalance = await g9Token.balanceOf(await ubaStore.getAddress());
 
-    const [storedHash, verified] = await credentials.getCredential(student.address);
-    expect(storedHash).to.equal(docHash);
-    expect(verified).to.equal(false);
-  });
-
-  it("should allow admin to verify credential with enough tokens", async function () {
-    const docHash = ethers.keccak256(
-      ethers.toUtf8Bytes("Jane Doe|Cyber|BSc|2024")
-    );
-    await credentials.addCredential(student.address, docHash);
-    await credentials.verifyCredential(student.address);
-
-    const [storedHash, verified] = await credentials.getCredential(student.address);
-    expect(verified).to.equal(true);
-  });
-
-  it("should fail to verify if student lacks tokens", async function () {
-    const docHash = ethers.keccak256(
-      ethers.toUtf8Bytes("Not Enough|Cyber|BSc|2025")
-    );
-    const lowBalance = signer2;
-
-    await credentials.addCredential(lowBalance.address, docHash);
-
-    await expect(
-      credentials.verifyCredential(lowBalance.address)
-    ).to.be.revertedWith("Student does not hold enough G9 tokens");
-  });
-
-  it("should not allow non-admin to add credentials", async function () {
-    const docHash = ethers.keccak256(
-      ethers.toUtf8Bytes("Malicious|Hacker|BSc|2022")
-    );
-
-    await expect(
-      credentials.connect(student).addCredential(student.address, docHash)
-    ).to.be.revertedWith("Only admin can perform this action");
-  });
+            await expect(() => ubaStore.connect(owner).withdrawTokens())
+                .to.changeTokenBalances(g9Token, [ubaStore, owner], [contractBalance * BigInt(-1), contractBalance]);
+        });
+    });
 });
